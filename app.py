@@ -14,8 +14,10 @@ st.title("🧮 Web App Tính Khối Lượng Đào Đắp Tùy Chọn Ranh Giớ
 # --- KHỞI TẠO TRẠNG THÁI LƯU TRỮ (SESSION STATE) ---
 if "calculated" not in st.session_state:
     st.session_state.calculated = False
-if "df_result" not in st.session_state:
-    st.session_state.df_result = None
+if "df_by_rows" not in st.session_state:
+    st.session_state.df_by_rows = None
+if "df_by_cols" not in st.session_state:
+    st.session_state.df_by_cols = None
 if "total_cut" not in st.session_state:
     st.session_state.total_cut = 0.0
 if "total_fill" not in st.session_state:
@@ -130,7 +132,6 @@ def parse_boundary(mode, sub_mode, file_obj, pts1, pts2):
         except: return None, "custom"
     return None, "custom"
 
-# --- XỬ LÝ TÍNH TOÁN KHI NHẤN NÚT ---
 if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
     pts1 = load_real_points(surface_1)
     pts2 = load_real_points(surface_2)
@@ -158,33 +159,39 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
         x_coords = np.arange(x_min, x_max + grid_size, grid_size)
         y_coords = np.arange(y_min, y_max + grid_size, grid_size)
         
-        grid_rows_list = []
+        raw_cell_records = []
         cad_cells = []
         total_cut_vol = 0.0
         total_fill_vol = 0.0
-        
-        # ĐỊNH NGHĨA KÍCH THƯỚC LƯỚI VI PHÂN SIÊU MỊN ĐỂ TRIỆT TIÊU SAI SỐ HÌNH HỌC (0.5m)
         SUB_STEP = 0.5 
         
+        def get_vertex_z(pts_data, surface_cfg, corners_array):
+            if surface_cfg["type"] == "const":
+                return np.full(4, float(surface_cfg["value"]))
+            z = griddata(pts_data[:, :2], pts_data[:, 2], corners_array, method='linear')
+            nan_m = np.isnan(z)
+            if np.any(nan_m):
+                z[nan_m] = griddata(pts_data[:, :2], pts_data[:, 2], corners_array[nan_m], method='nearest')
+            return z.astype(float)
+
         for r_idx in range(len(y_coords) - 1):
-            row_cells_data = []
-            y_start = y_coords[r_idx]
-            y_end = y_coords[r_idx + 1]
-            
+            y_start, y_end = y_coords[r_idx], y_coords[r_idx + 1]
             for c_idx in range(len(x_coords) - 1):
-                x_start = x_coords[c_idx]
-                x_end = x_coords[c_idx + 1]
+                x_start, x_end = x_coords[c_idx], x_coords[c_idx + 1]
                 
                 cell_poly = Polygon([(x_start, y_start), (x_end, y_start), (x_end, y_end), (x_start, y_end)])
                 if not cell_poly.intersects(boundary_polygon):
-                    row_cells_data.append("Ngoài RG")
                     continue
                 
                 intersected_geo = cell_poly.intersection(boundary_polygon)
                 actual_area = intersected_geo.area
                 if actual_area < 0.001:
-                    row_cells_data.append("Ngoài RG")
                     continue
+                
+                # Tính cao độ độc lập tại 4 đỉnh hình học gốc
+                corners = np.array([[x_start, y_start], [x_end, y_start], [x_end, y_end], [x_start, y_end]])
+                z1_corners = get_vertex_z(pts1, surface_1, corners)
+                z2_corners = get_vertex_z(pts2, surface_2, corners)
                 
                 grid_lines_to_draw = []
                 if isinstance(intersected_geo, Polygon):
@@ -193,22 +200,19 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
                     for poly in intersected_geo.geoms:
                         grid_lines_to_draw.append(list(poly.exterior.coords))
                 
-                # --- THUẬT TOÁN MỚI: TÍCH PHÂN SỐ TRÊN LƯỚI SIÊU MỊN CỦA Ô LƯỚI ---
+                # --- TÍCH PHÂN VI PHÂN SIÊU MỊN CHUẨN XÁC ---
                 sub_x = np.arange(x_start + SUB_STEP/2, x_end, SUB_STEP)
                 sub_y = np.arange(y_start + SUB_STEP/2, y_end, SUB_STEP)
                 xv, yv = np.meshgrid(sub_x, sub_y)
                 sub_pts = np.vstack([xv.ravel(), yv.ravel()]).T
                 
-                # Lọc các điểm vi phân nằm thực tế bên trong ranh giới
                 valid_sub_mask = np.array([boundary_polygon.contains(Point(p[0], p[1])) for p in sub_pts])
                 if not np.any(valid_sub_mask):
-                    row_cells_data.append("Ngoài RG")
                     continue
                     
                 valid_sub_pts = sub_pts[valid_sub_mask]
-                sub_area = SUB_STEP * SUB_STEP # Diện tích hình học của 1 pixel vi phân
+                sub_area = SUB_STEP * SUB_STEP
                 
-                # Nội suy đồng bộ cao độ cho tập điểm vi phân
                 def get_sub_z(pts_data, surface_cfg):
                     if surface_cfg["type"] == "const":
                         return np.full(len(valid_sub_pts), float(surface_cfg["value"]))
@@ -221,21 +225,25 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
                 z1_sub = get_sub_z(pts1, surface_1)
                 z2_sub = get_sub_z(pts2, surface_2)
                 
-                # Tích phân thể tích của ô lưới = Tổng thể tích các cột vi phân
                 dz_sub = z2_sub - z1_sub
                 cell_volume = np.sum(dz_sub * sub_area)
-                
                 cell_cut = abs(np.sum(dz_sub[dz_sub < 0] * sub_area))
                 cell_fill = np.sum(dz_sub[dz_sub > 0] * sub_area)
                 
-                if cell_volume < 0:
-                    cell_str = f"Đào: {cell_cut:.1f} m³"
-                else:
-                    cell_str = f"Đắp: {cell_fill:.1f} m³"
-                    
                 total_cut_vol += cell_cut
-                total_fill_vol += cell_fill
-                row_cells_data.append(f"{cell_str} ({actual_area:.1f}㎡)")
+                total_fill_vol += fill_v = cell_fill
+                
+                # ĐÃ SỬA: Tách tường minh giá trị của từng góc ra các cột đơn lập
+                raw_cell_records.append({
+                    'row_idx': r_idx + 1,
+                    'col_idx': c_idx + 1,
+                    'cell_name': f"H{r_idx+1}-C{c_idx+1}",
+                    's1_g1': float(z1_corners[0]), 's1_g2': float(z1_corners[1]), 's1_g3': float(z1_corners[2]), 's1_g4': float(z1_corners[3]),
+                    's2_g1': float(z2_corners[0]), 's2_g2': float(z2_corners[1]), 's2_g3': float(z2_corners[2]), 's2_g4': float(z2_corners[3]),
+                    'area': float(actual_area),
+                    'cut': float(cell_cut),
+                    'fill': float(cell_fill)
+                })
                 
                 cx, cy = intersected_geo.centroid.x, intersected_geo.centroid.y
                 cad_cells.append({
@@ -243,19 +251,37 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
                     'volume': -cell_cut if cell_volume < 0 else cell_fill
                 })
                 
-            grid_rows_list.append(row_cells_data)
+        if len(raw_cell_records) > 0:
+            df_base = pd.DataFrame(raw_cell_records)
+            excel_cols = [
+                "Tên ô lưới", 
+                "BM1-Góc 1 (Dưới-Trái)", "BM1-Góc 2 (Dưới-Phải)", "BM1-Góc 3 (Trên-Phải)", "BM1-Góc 4 (Trên-Trái)",
+                "BM2-Góc 1 (Dưới-Trái)", "BM2-Góc 2 (Dưới-Phải)", "BM2-Góc 3 (Trên-Phải)", "BM2-Góc 4 (Trên-Trái)", 
+                "Diện tích ô lưới (㎡)", "Khối lượng Đào (m³)", "Khối lượng Đắp (m³)"
+            ]
             
-        if len(grid_rows_list) > 0:
-            max_cols = max(len(r) for r in grid_rows_list)
-            df_cols = [f"Cột {c+1}" for c in range(max_cols)]
-            df_index = [f"Hàng {r+1}" for r in range(len(grid_rows_list))]
-            st.session_state.df_result = pd.DataFrame(grid_rows_list, columns=df_cols, index=df_index).reset_index().rename(columns={'index': 'Hàng/Cột'})
+            # Sắp xếp Khối kết quả theo Hàng (Row-major Order)
+            df_rows = df_base.sort_values(by=['row_idx', 'col_idx'])
+            st.session_state.df_by_rows = df_rows[[
+                'cell_name', 's1_g1', 's1_g2', 's1_g3', 's1_g4',
+                's2_g1', 's2_g2', 's2_g3', 's2_g4', 'area', 'cut', 'fill'
+            ]].copy()
+            st.session_state.df_by_rows.columns = excel_cols
+            
+            # Sắp xếp Khối kết quả theo Cột (Column-major Order)
+            df_cols_order = df_base.sort_values(by=['col_idx', 'row_idx'])
+            st.session_state.df_by_cols = df_cols_order[[
+                'cell_name', 's1_g1', 's1_g2', 's1_g3', 's1_g4',
+                's2_g1', 's2_g2', 's2_g3', 's2_g4', 'area', 'cut', 'fill'
+            ]].copy()
+            st.session_state.df_by_cols.columns = excel_cols
+            
             st.session_state.total_cut = total_cut_vol
             st.session_state.total_fill = total_fill_vol
             st.session_state.cad_grid_data = cad_cells
             st.session_state.calculated = True
-if st.session_state.calculated and st.session_state.df_result is not None:
-    st.success("🎉 Đã hoàn thành thuật toán tích phân vi phân lưới bảo toàn khối lượng tổng thể!")
+if st.session_state.calculated and st.session_state.df_by_rows is not None:
+    st.success("🎉 Đã hoàn thành thuật toán cấu trúc lại bảng tính Excel theo đúng 12 cột độc lập quy chuẩn!")
     
     col1, col2, col3 = st.columns(3)
     col1.metric("Tổng khối lượng ĐÀO 🟥", f"{st.session_state.total_cut:,.2f} m³")
@@ -263,22 +289,28 @@ if st.session_state.calculated and st.session_state.df_result is not None:
     net_diff = st.session_state.total_fill - st.session_state.total_cut
     col3.metric("Khối lượng cân bằng chênh lệch", f"{net_diff:,.2f} m³", delta_color="inverse")
 
-    st.subheader("📊 Bảng phân bố lưới ô vuông đã cắt tỉa")
-    st.dataframe(st.session_state.df_result, use_container_width=True)
+    # Tạo giao diện Tab phân tách trực quan trên Web
+    tab1, tab2 = st.tabs(["📊 Khối kết quả sắp xếp theo HÀNG", "📊 Khối kết quả sắp xếp theo CỘT"])
+    with tab1:
+        st.dataframe(st.session_state.df_by_rows, use_container_width=True)
+    with tab2:
+        st.dataframe(st.session_state.df_by_cols, use_container_width=True)
     
-    st.subheader("💾 Tải về file thành phẩm tích hợp số liệu thực")
+    st.subheader("💾 Tải về tệp báo cáo kỹ thuật 12 cột")
     dwn_col1, dwn_col2 = st.columns(2)
     
+    # Xuất Excel từ RAM chứa đúng cấu trúc 12 cột độc lập
     output_excel = io.BytesIO()
     with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
-        st.session_state.df_result.to_excel(writer, index=False, sheet_name="Khoi_Luong_Cat_Tia")
+        st.session_state.df_by_rows.to_excel(writer, index=False, sheet_name="Sap_Xep_Theo_Hang")
+        st.session_state.df_by_cols.to_excel(writer, index=False, sheet_name="Sap_Xep_Theo_Cot")
     excel_data = output_excel.getvalue()
     
     with dwn_col1:
         st.download_button(
-            label="📥 Tải xuống Bảng tính Excel (.xlsx)",
+            label="📥 Tải xuống Bảng tính Excel 12 cột (.xlsx)",
             data=excel_data,
-            file_name="khoi_luong_luoi_o_vuong.xlsx",
+            file_name="bao_cao_khoi_luong_12_cot.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
@@ -341,4 +373,4 @@ if st.session_state.calculated and st.session_state.df_result is not None:
             use_container_width=True
         )
 else:
-    st.info("💡 Hướng dẫn: Cấu hình các thông số bề mặt ở thanh điều hướng bên trái (Sidebar), sau đó nhấn nút 'Tiến hành tính toán khối lượng' để xem kết quả lưới ô vuông.")
+    st.info("💡 Hướng dẫn: Cấu hình dữ liệu đầu vào và ranh giới tại Sidebar bên trái, sau đó nhấn nút để nhận báo cáo Excel phân tầng 12 cột độc lập.")
