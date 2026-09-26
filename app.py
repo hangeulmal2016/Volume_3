@@ -121,9 +121,11 @@ def parse_boundary(mode, sub_mode, file_obj, pts1, pts2):
         except: return None, "custom"
     if "DXF" in mode:
         try:
-            dxf_stream = io.BytesIO(file_obj.read())
+            # Đã sửa lỗi stream: Chuyển dữ liệu băm thành luồng tệp độc lập cho ezdxf
+            dxf_data_bytes = file_obj.read()
             file_obj.seek(0)
-            doc = ezdxf.read(dxf_stream)
+            text_stream = io.StringIO(dxf_data_bytes.decode('utf-8', errors='ignore'))
+            doc = ezdxf.read(text_stream)
             msp = doc.modelspace()
             for entity in msp.query('LWPOLYLINE POLYLINE'):
                 coords = [pt[:2] for pt in entity.points()]
@@ -188,7 +190,6 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
                 if actual_area < 0.001:
                     continue
                 
-                # Tính cao độ độc lập tại 4 đỉnh hình học gốc
                 corners = np.array([[x_start, y_start], [x_end, y_start], [x_end, y_end], [x_start, y_end]])
                 z1_corners = get_vertex_z(pts1, surface_1, corners)
                 z2_corners = get_vertex_z(pts2, surface_2, corners)
@@ -200,7 +201,6 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
                     for poly in intersected_geo.geoms:
                         grid_lines_to_draw.append(list(poly.exterior.coords))
                 
-                # --- TÍCH PHÂN VI PHÂN SIÊU MỊN CHUẨN XÁC ---
                 sub_x = np.arange(x_start + SUB_STEP/2, x_end, SUB_STEP)
                 sub_y = np.arange(y_start + SUB_STEP/2, y_end, SUB_STEP)
                 xv, yv = np.meshgrid(sub_x, sub_y)
@@ -231,9 +231,9 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
                 cell_fill = np.sum(dz_sub[dz_sub > 0] * sub_area)
                 
                 total_cut_vol += cell_cut
-                total_fill_vol += fill_v = cell_fill
+                total_fill_vol += cell_fill # Đã vá lỗi NameError cú pháp gộp dòng
                 
-                # ĐÃ SỬA: Tách tường minh giá trị của từng góc ra các cột đơn lập
+                # ĐÃ SỬA TRIỆT ĐỂ: Bóc tách chính xác từng chỉ mục mảng góc [0],[1],[2],[3] sang các cột độc lập
                 raw_cell_records.append({
                     'row_idx': r_idx + 1,
                     'col_idx': c_idx + 1,
@@ -260,7 +260,6 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
                 "Diện tích ô lưới (㎡)", "Khối lượng Đào (m³)", "Khối lượng Đắp (m³)"
             ]
             
-            # Sắp xếp Khối kết quả theo Hàng (Row-major Order)
             df_rows = df_base.sort_values(by=['row_idx', 'col_idx'])
             st.session_state.df_by_rows = df_rows[[
                 'cell_name', 's1_g1', 's1_g2', 's1_g3', 's1_g4',
@@ -268,7 +267,6 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
             ]].copy()
             st.session_state.df_by_rows.columns = excel_cols
             
-            # Sắp xếp Khối kết quả theo Cột (Column-major Order)
             df_cols_order = df_base.sort_values(by=['col_idx', 'row_idx'])
             st.session_state.df_by_cols = df_cols_order[[
                 'cell_name', 's1_g1', 's1_g2', 's1_g3', 's1_g4',
@@ -281,7 +279,7 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
             st.session_state.cad_grid_data = cad_cells
             st.session_state.calculated = True
 if st.session_state.calculated and st.session_state.df_by_rows is not None:
-    st.success("🎉 Đã hoàn thành thuật toán cấu trúc lại bảng tính Excel theo đúng 12 cột độc lập quy chuẩn!")
+    st.success("🎉 Tính toán thành công! Dữ liệu 12 cột và bản vẽ CAD đã sẵn sàng.")
     
     col1, col2, col3 = st.columns(3)
     col1.metric("Tổng khối lượng ĐÀO 🟥", f"{st.session_state.total_cut:,.2f} m³")
@@ -289,17 +287,15 @@ if st.session_state.calculated and st.session_state.df_by_rows is not None:
     net_diff = st.session_state.total_fill - st.session_state.total_cut
     col3.metric("Khối lượng cân bằng chênh lệch", f"{net_diff:,.2f} m³", delta_color="inverse")
 
-    # Tạo giao diện Tab phân tách trực quan trên Web
     tab1, tab2 = st.tabs(["📊 Khối kết quả sắp xếp theo HÀNG", "📊 Khối kết quả sắp xếp theo CỘT"])
     with tab1:
         st.dataframe(st.session_state.df_by_rows, use_container_width=True)
     with tab2:
         st.dataframe(st.session_state.df_by_cols, use_container_width=True)
     
-    st.subheader("💾 Tải về tệp báo cáo kỹ thuật 12 cột")
+    st.subheader("💾 Tải về tệp báo cáo kỹ thuật công trường")
     dwn_col1, dwn_col2 = st.columns(2)
     
-    # Xuất Excel từ RAM chứa đúng cấu trúc 12 cột độc lập
     output_excel = io.BytesIO()
     with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
         st.session_state.df_by_rows.to_excel(writer, index=False, sheet_name="Sap_Xep_Theo_Hang")
